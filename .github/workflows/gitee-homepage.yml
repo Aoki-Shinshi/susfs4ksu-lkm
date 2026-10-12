@@ -8,8 +8,9 @@ name: gitee-homepage
 #     release BY HAND - a GitHub runner is overseas and gitee.com is the far end of that
 #     link, which measured about 15 KB/s, i.e. tens of minutes per release for no benefit
 #     over doing it from a machine that is already in China;
-#   * what stays on Gitee is one branch whose only content is a README pointing at GitHub,
-#     so that anyone who lands on the Gitee project page knows where the source is.
+#   * what stays on Gitee is one branch whose only content is a README that says what this
+#     repository is: the domestic mirror of the GitHub project's releases.  It also states
+#     that no feedback is taken here - no issues, no pull requests, no comments.
 #
 # Run by hand.  It is a tidy-up tool, not a publishing step: it never uploads anything.
 #
@@ -69,21 +70,22 @@ jobs:
           git config user.name "gitee-homepage"
           git config user.email "gitee-homepage@users.noreply.github.com"
 
-          cat > README.md <<EOF
-          # susfs_guard_lkm — Gitee 镜像页
-
-          本仓库在 Gitee 上**只放这一页说明**，不镜像源码、不在此上传构建产物。
-
-          - **源码 / issue / PR / 每次发布的 \`.ko\` 产物**：<${url}>
-          - 需要某个内核变体的模块时，请到上面仓库的 **Releases** 页面下载
-            （\`susfs_guard_lkm-<android版本>-<内核版本>.ko\` + 加载器 \`susfs_insmod\`）
-
-          为什么这里没有源码：Gitee 侧此前是源码镜像，已按要求下线；本页保留是为了说明
-          项目现在在哪里，以及为什么 Gitee 上只有这一个分支。
-          EOF
+          # Built with printf rather than a heredoc on purpose: a heredoc inside this block
+          # scalar would carry the YAML indentation into the file, which turns the whole
+          # README into an indented code block on the far side.
+          {
+            echo '# susfs_guard_lkm — GitHub release 的国内镜像'
+            echo
+            echo "本仓库是 [inforcqb/susfs4ksu-lkm](${url}) 的 **release 国内镜像**。"
+            echo '每个版本的构建产物 —— 各内核变体的 `.ko` 与加载器 `susfs_insmod` ——'
+            echo '以 Release 附件的形式发布在这里；源码、文档与开发都在 GitHub 仓库。'
+            echo
+            echo '**本仓库不接受任何反馈**：不处理 issue、不接受 PR、不回复评论。'
+            echo '问题、建议或 bug，请到 GitHub 仓库提交。'
+          } > README.md
 
           git add README.md
-          git commit -q -m "gitee: this repository only points at the GitHub project"
+          git commit -q -m "gitee: domestic release mirror of the GitHub project, no feedback here"
           git push -q --force "https://${owner}:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" HEAD:refs/heads/main
 
           # Every other branch goes: the mirror is gone, and the default branch stays only
