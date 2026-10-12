@@ -153,16 +153,23 @@ jobs:
         env:
           GITEE_REPO: ${{ vars.GITEE_REPO }}
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          API: https://gitee.com/api/v5/repos/${{ vars.GITEE_REPO }}
+          ID: ${{ steps.rel.outputs.id }}
         run: |
           set -euo pipefail
-          api="https://gitee.com/api/v5/repos/${GITEE_REPO}"
-          id="${{ steps.rel.outputs.id }}"
 
-          for f in assets/*; do
+          # Four uploads at a time, not one after another.  The runner is overseas and
+          # gitee.com is the far end of that link, so a serial loop pays the round trip (and
+          # a fresh process, connection and TLS handshake) once per file for no reason - it
+          # is the same POST to releases/<id>/attach_files either way.  --retry is for the
+          # same link's habit of dropping a transfer mid-body.
+          printf '%s\n' assets/* | xargs -P 4 -I{} sh -c '
+            f="$1"
             echo "uploading $(basename "$f") ($(stat -c%s "$f") bytes)"
-            curl -sf -X POST "${api}/releases/${id}/attach_files?access_token=${GITEE_TOKEN}" \
+            curl -sf --retry 3 --retry-delay 2 --retry-all-errors \
+                 -X POST "${API}/releases/${ID}/attach_files?access_token=${GITEE_TOKEN}" \
                  -F "file=@$f" -o /dev/null
-          done
+          ' _ {}
 
           echo "--- the release as Gitee sees it ---"
-          curl -sf "${api}/releases/tags/${TAG}?access_token=${GITEE_TOKEN}" | jq -r '.assets[]? | "\(.name) \(.size)"'
+          curl -sf "${API}/releases/tags/${TAG}?access_token=${GITEE_TOKEN}" | jq -r '.assets[]? | "\(.name) \(.size)"'
