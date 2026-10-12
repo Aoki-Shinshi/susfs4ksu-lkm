@@ -158,18 +158,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Four uploads at a time, not one after another.  The runner is overseas and
+          # Eight uploads at a time, not one after another.  The runner is overseas and
           # gitee.com is the far end of that link, so a serial loop pays the round trip (and
           # a fresh process, connection and TLS handshake) once per file for no reason - it
-          # is the same POST to releases/<id>/attach_files either way.  --retry is for the
-          # same link's habit of dropping a transfer mid-body.
-          printf '%s\n' assets/* | xargs -P 4 -I{} sh -c '
+          # is the same POST to releases/<id>/attach_files either way.  What made this a
+          # priority was a measured run that moved 4.6MB in over five minutes (about 15 KB/s)
+          # with a single connection open: if the far end is throttling one connection, more
+          # of them is the fix.  --retry is for the same link dropping a transfer mid-body.
+          #
+          # Every transfer prints its own size, wall time and throughput, and the step closes
+          # with the total: "it was slow" is not a diagnosis, a number per file is.
+          start=$(date +%s)
+          printf '%s\n' assets/* | xargs -P 8 -I{} sh -c '
             f="$1"
-            echo "uploading $(basename "$f") ($(stat -c%s "$f") bytes)"
+            b=$(basename "$f")
             curl -sf --retry 3 --retry-delay 2 --retry-all-errors \
                  -X POST "${API}/releases/${ID}/attach_files?access_token=${GITEE_TOKEN}" \
-                 -F "file=@$f" -o /dev/null
+                 -F "file=@$f" -o /dev/null \
+                 -w "${b}: %{size_upload} B in %{time_total}s at %{speed_upload} B/s\n" \
+              || { echo "${b}: FAILED (curl exit $?)"; exit 1; }
           ' _ {}
+          echo "total: $(( $(date +%s) - start ))s of wall clock for $(du -sb assets | cut -f1) B"
 
           echo "--- the release as Gitee sees it ---"
           curl -sf "${API}/releases/tags/${TAG}?access_token=${GITEE_TOKEN}" | jq -r '.assets[]? | "\(.name) \(.size)"'
