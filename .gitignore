@@ -36,8 +36,9 @@ t_*.sh
 t_*.ps1
 art/
 
-# Documents that are not needed to build or use the module are kept out of the tree:
-# only README.md and PROC_INTERFACES.md are published.
+# Documents that are not needed to build or use the module are kept out of the tree.
+# The published ones are allow-listed below: the README and the /proc interface
+# docs, each in Chinese and in English.
 *.md
 !README.md
 !PROC_INTERFACES.md
