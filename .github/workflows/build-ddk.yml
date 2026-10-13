@@ -778,13 +778,17 @@ jobs:
           python-version: "3.12"
 
       # The tag carries the ref and the commit because this is a build, not a release: the ZIP
-      # from a PR run says so in its own name and in module.prop.
+      # from a PR run says so in its own name and in module.prop.  The ref's slashes are folded
+      # to dashes FIRST: a branch called pr/someone would otherwise turn the output path into
+      # dist/susfs_guard_lkm-module-pr/someone-<sha>-arm64.zip - a directory - and the upload
+      # below would report "no files were found" against dist/*.zip.
       - name: Pack the module
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}-$(git rev-parse --short HEAD)"
+          tag="$(echo "$GITHUB_REF_NAME" | tr '/' '-')-$(git rev-parse --short HEAD)"
           python tools/pack_module.py --ko-dir ko --insmod bin/susfs_insmod \
             --tag "$tag" --out "dist/susfs_guard_lkm-module-$tag-arm64.zip"
+          ls -l dist
 
       - name: Upload the flashable module
         uses: actions/upload-artifact@v4
