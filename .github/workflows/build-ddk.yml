@@ -730,3 +730,65 @@ jobs:
           name: susfs_insmod
           path: /tmp/susfs_insmod
           if-no-files-found: warn
+
+  # The flashable KernelSU module, packed from the artifacts of the run that just finished.
+  #
+  # It sits after the matrix rather than only in a release-triggered workflow of its own so that
+  # EVERY build produces a testable ZIP: the run page hands out something a device can flash, with
+  # no release existing yet.  Attaching the same ZIP to a published release is still done by
+  # module-zip.yml, which calls the same tools/pack_module.py - one packer, two callers.
+  module-zip:
+    needs: [module, tools]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # A matrix artifact is named susfs_guard_lkm.ko-<variant> and holds a file called
+      # susfs_guard_lkm.ko; the packer keys every KMI off the per-KMI name, so the directory name
+      # is folded back into the file name here - the same rename the release workflow does.
+      - name: Collect the per-KMI modules
+        uses: actions/download-artifact@v4
+        with:
+          pattern: 'susfs_guard_lkm.ko-*'
+          path: ko
+
+      - name: Collect the loader
+        uses: actions/download-artifact@v4
+        with:
+          name: susfs_insmod
+          path: bin
+
+      - name: Name the modules after their KMI
+        run: |
+          set -euo pipefail
+          cd ko
+          for d in */; do
+            kmi="${d%/}"
+            kmi="${kmi#susfs_guard_lkm.ko-}"
+            mv "$d/susfs_guard_lkm.ko" "susfs_guard_lkm-$kmi.ko"
+            rmdir "$d"
+          done
+          ls -l
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The tag carries the ref and the commit because this is a build, not a release: the ZIP
+      # from a PR run says so in its own name and in module.prop.
+      - name: Pack the module
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}-$(git rev-parse --short HEAD)"
+          python tools/pack_module.py --ko-dir ko --insmod bin/susfs_insmod \
+            --tag "$tag" --out "dist/susfs_guard_lkm-module-$tag-arm64.zip"
+
+      - name: Upload the flashable module
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs_guard_lkm-module-arm64
+          path: dist/*.zip
+          if-no-files-found: error
