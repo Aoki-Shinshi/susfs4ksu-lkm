@@ -529,11 +529,11 @@ jobs:
           #     variant.  fput is deliberately NOT here: it is EXPORT_SYMBOL'd and used as an
           #     ordinary import, which the loader gate above and imports_guard.c already cover.
           #
-          #     file_close_fd is the same function under its 6.11+ name, but NOT the same
-          #     signature: close_fd_get_file() (fs/file.c:795-805) returns an int status and
-          #     fills an out-param, file_close_fd() (fs/file.c:778-796) returns the file.  The
-          #     module keeps a pointer per name, so both are listed - and the counts are where that rename became
-          #     visible (close_fd_get_file: 1 on 5.10/5.15/6.1/6.6, 0 on 6.12/6.18).
+          #     close_fd_get_file() and file_close_fd() are alternate names with different
+          #     signatures: the former returns a status and fills an out-param, while the latter
+          #     returns the file directly.  The module keeps a matching pointer per name, so both
+          #     are listed - the expected counts are close_fd_get_file: 1 on 5.10/5.15/6.1/6.6
+          #     and 0 on 6.12/6.18.
           #     The two syscall tables are listed for the same reason: susfs_fp_hook resolves them
           #     by name, and a 0 for either is what would stop every table-entry layer at once
           #     (the tables themselves obviously exist - this is about the symbol being in
