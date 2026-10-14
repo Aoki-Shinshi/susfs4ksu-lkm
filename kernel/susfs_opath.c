@@ -97,20 +97,37 @@ static inline bool opath_has_landing_pad(const void *fn)
 	return fn && READ_ONCE(*(const u32 *)fn) == SUSFS_ARM64_BTI_C;
 }
 
-/* Resolved BY NAME at init and cached, exactly like sus_open_redirect.c does it: fget_raw() is
- * an EXPORT_SYMBOL (fs/file.c:927-931) but GKI's module symbol list is not a promise, and
- * close_fd_get_file() (fs/file.c:795-805) is not exported at all - it is a global function,
- * so kallsyms has it and the module's own resolver can name it.  Both are called through these
- * pointers, so every function that calls them carries __nocfi.
- * susfs_opath_init() installs no table entry while either is unresolved: a wrapper that cannot
- * finish its post-check would deny nothing and only add a fault path, so the layer stays off
- * instead (the counters and the log say which name was missing). */
+/* Resolved by name at init and cached, exactly like sus_open_redirect.c does it.  fget_raw() is
+ * exported, but GKI's module symbol list is not a promise; the close-fd helpers are global
+ * symbols whose names are found by the module's resolver.  Their signatures differ by kernel
+ * generation, so each is called through its matching pointer and every caller carries __nocfi.
+ * susfs_opath_init() installs no table entry while either required capability is unresolved: a
+ * wrapper that cannot finish its post-check would deny nothing and only add a fault path. */
 static struct file *(*opath_fget_raw)(unsigned int fd);
+/* Two names with two SIGNATURES, not one function spelled twice: older kernels'
+ * close_fd_get_file(fd, &res) returns an int status and fills res, while newer kernels'
+ * file_close_fd(fd) returns the file itself.  Calling the latter through the former's
+ * prototype read a struct file * as a status: every deny counted as a failure, the fd was
+ * already out of the table, and the reference was never fput. */
 static int (*opath_close_fd_get_file)(unsigned int fd, struct file **res);
+static struct file *(*opath_file_close_fd)(unsigned int fd);
 /* Which of the two names the kernel above answered to (see susfs_opath_init): only the log
  * needs it, and a log that prints a pointer without the name it came from cannot tell
  * close_fd_get_file from file_close_fd on a kernel where one of them is missing. */
 static const char *opath_close_fd_name = "close_fd_get_file";
+
+/* Take the fd out of the table under whichever name this kernel has.  NULL means it was not
+ * ours to take; a non-NULL file is owned by the caller and must be fput. */
+static __nocfi struct file *opath_take_fd(unsigned int fd)
+{
+	struct file *f = NULL;
+
+	if (opath_file_close_fd)
+		return opath_file_close_fd(fd);
+	if (opath_close_fd_get_file && !opath_close_fd_get_file(fd, &f))
+		return f;
+	return NULL;
+}
 
 /* What the layer did, not what it is configured to do: a wrapper that never runs and one that
  * runs and matches nothing look identical from the outside, and only these separate them. */
@@ -179,12 +196,13 @@ static __nocfi long susfs_opath_post(long ret)
 	 * the one being closed.  A failure here means the fd is not ours any more, which cannot
 	 * happen inside this syscall - so the original answer is kept rather than promised away,
 	 * and the counter says it happened. */
-	if (opath_close_fd_get_file((unsigned int)ret, &victim)) {
+	victim = opath_take_fd((unsigned int)ret);
+	if (!victim) {
 		atomic_inc(&n_opath_err);
 		return ret;
 	}
 
-	/* fput() and not filp_close(): close_fd_get_file()'s comment asks for filp_close()
+	/* fput() and not filp_close(): the close-fd helper's normal contract asks for filp_close()
 	 * first, and for an O_PATH file that reduces to exactly this call - do_dentry_open()
 	 * set f_op = &empty_fops, so f_op->flush is NULL, and a file that was never opened for
 	 * reading can hold neither a POSIX lock nor a dnotify mark, which are the other two
@@ -442,20 +460,19 @@ int susfs_opath_init(void)
 
 	opath_fget_raw = (void *)find_kernel_symbol_exact("fget_raw");
 
-	/* One function, two names: 6.11 reworked the fd-table internals, so what 5.15 calls
-	 * close_fd_get_file() (fs/file.c:795-805) is file_close_fd() from 6.12 on
-	 * (fs/file.c:784-791) - the same "take the fd out of the table, hand the caller the file,
-	 * it fputs it" contract, with the locking still inside.  This is not a cosmetic rename for
-	 * us: the CI's by-name step measures close_fd_get_file as 1 on 5.10/5.15/6.1/6.6 and 0 on
-	 * 6.12/6.18, and that 0 is this layer refusing to install on those kernels. */
+	/* The fd-table helper changed both name and return convention in newer kernels:
+	 * close_fd_get_file(fd, &file) returns an int status and fills an out-parameter, while
+	 * file_close_fd(fd) returns the struct file * directly.  Resolve by name instead of a version
+	 * check so vendor backports are handled, and call whichever helper was found through its
+	 * matching pointer. */
 	opath_close_fd_get_file = (void *)find_kernel_symbol_exact("close_fd_get_file");
 	opath_close_fd_name = "close_fd_get_file";
 	if (!opath_close_fd_get_file) {
-		opath_close_fd_get_file = (void *)find_kernel_symbol_exact("file_close_fd");
+		opath_file_close_fd = (void *)find_kernel_symbol_exact("file_close_fd");
 		opath_close_fd_name = "file_close_fd";
 	}
 
-	if (!opath_fget_raw || !opath_close_fd_get_file) {
+	if (!opath_fget_raw || (!opath_close_fd_get_file && !opath_file_close_fd)) {
 		/* Refusing to install beats installing a wrapper that cannot finish: without
 		 * these two the post-check could not take a descriptor away, so the layer
 		 * would only have added a fault path to every open on the system.  Both names
@@ -533,7 +550,8 @@ int susfs_opath_init(void)
 	SUSFS_LOGI("opath armed: %d/%d entries, proc=%d, fget_raw=%px %s=%px\n",
 		armed, attempted, opath_proc_entry != NULL,
 		(void *)opath_fget_raw, opath_close_fd_name,
-		(void *)opath_close_fd_get_file);
+		opath_close_fd_get_file ? (void *)opath_close_fd_get_file
+					: (void *)opath_file_close_fd);
 	return 0;
 }
 
