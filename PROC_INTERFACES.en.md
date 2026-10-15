@@ -171,7 +171,7 @@ Decides which lines the mount hiding (`ksu_susfs hide_sus_mnts_for_non_su_procs 
 
 ```sh
 cat /proc/susfs_hide_mounts
-# mount prefixes: 2/8, rescans=1, recorded=0, hidden_by_identity=0, learned_ids=0
+# mount prefixes: 2/64, rescans=1, recorded=0, hidden_by_identity=0, learned_ids=0
 # prefixes: /data/adb/ /data/local/tmp/
 
 # write commands
