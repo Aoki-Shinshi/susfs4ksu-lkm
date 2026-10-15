@@ -661,6 +661,26 @@ jobs:
           path: /tmp/susfs_bench
           if-no-files-found: warn
 
+      # Resolves this process's own /proc/self/map_files entries N times, as the uid it is started
+      # with.  The map_files layer answers -ENOENT whether or not the reference the callee took is
+      # handed over, so the leak is only visible afterwards: an unmount of the mapping's filesystem
+      # succeeding, or coming back EBUSY.
+      - name: Build map_files probe
+        run: |
+          clang --target=aarch64-linux-gnu -O2 -nostdlib -static-pie \
+                -fno-stack-protector -fno-builtin -fuse-ld=lld -Wl,-e,_start \
+                -o /tmp/susfs_mapfile_probe tools/susfs_mapfile_probe.c
+          file /tmp/susfs_mapfile_probe
+          ls -la /tmp/susfs_mapfile_probe
+
+      - name: Upload map_files probe
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs_mapfile_probe
+          path: /tmp/susfs_mapfile_probe
+          if-no-files-found: warn
+
       # mmap a file, touch it, then read /proc/self/pagemap and /proc/self/smaps_rollup *in the same process* - a shell
       # cannot do this, because the child that runs dd has its own mm and therefore its own addresses.
       - name: Build mmap/pagemap probe
