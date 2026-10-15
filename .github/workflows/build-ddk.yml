@@ -529,11 +529,12 @@ jobs:
           #     variant.  fput is deliberately NOT here: it is EXPORT_SYMBOL'd and used as an
           #     ordinary import, which the loader gate above and imports_guard.c already cover.
           #
-          #     close_fd_get_file() and file_close_fd() are alternate names with different
-          #     signatures: the former returns a status and fills an out-param, while the latter
-          #     returns the file directly.  The module keeps a matching pointer per name, so both
-          #     are listed - the expected counts are close_fd_get_file: 1 on 5.10/5.15/6.1/6.6
-          #     and 0 on 6.12/6.18.
+          #     close_fd_get_file() and file_close_fd() are the old and the new name of the same
+          #     helper - and 6.1 changed the SIGNATURE without changing the name (int status plus
+          #     an out-param became the file itself).  The module picks its prototype from the
+          #     kernel it is built for, so which name must resolve differs per variant: the
+          #     expected counts are close_fd_get_file: 1 on 5.10/5.15/6.1/6.6 and 0 on 6.12/6.18,
+          #     with file_close_fd the other way round.
           #     The two syscall tables are listed for the same reason: susfs_fp_hook resolves them
           #     by name, and a 0 for either is what would stop every table-entry layer at once
           #     (the tables themselves obviously exist - this is about the symbol being in
@@ -659,6 +660,26 @@ jobs:
         with:
           name: susfs_bench
           path: /tmp/susfs_bench
+          if-no-files-found: warn
+
+      # What an open handed back, asked the way a caller asks: the fd or the errno, F_GETFD
+      # (FD_CLOEXEC), F_GETFL, fstat(fd) - which is EBADF if the number was taken out of the table
+      # after the syscall said it succeeded - and readlink(/proc/self/fd/N), which names the file the
+      # descriptor refers to and so separates a followed symlink from the link itself.
+      - name: Build open-result probe
+        run: |
+          clang --target=aarch64-linux-gnu -O2 -nostdlib -static-pie \
+                -fno-stack-protector -fno-builtin -fuse-ld=lld -Wl,-e,_start \
+                -o /tmp/susfs_open_probe tools/susfs_open_probe.c
+          file /tmp/susfs_open_probe
+          ls -la /tmp/susfs_open_probe
+
+      - name: Upload open-result probe
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs_open_probe
+          path: /tmp/susfs_open_probe
           if-no-files-found: warn
 
       # mmap a file, touch it, then read /proc/self/pagemap and /proc/self/smaps_rollup *in the same process* - a shell
