@@ -373,7 +373,19 @@ void open_main(long argc, char **argv)
 
 	pos = 0;
 	pos = put(pos, "path     = ");
-	pos = put(pos, path ? path : "(none - usage: susfs_open_probe <path> [flags_hex] [mode_dec] [--openat2|--both] [--resolve=hex])");
+	if (path) {
+		/* Bounded: out[] is 2048 bytes while argv[1] can be far longer (MAX_ARG_STRLEN is
+		 * 128 KiB), so copying the whole argument here would run past the buffer and spill
+		 * the globals next to it. */
+		u32 n = 0;
+
+		while (path[n] && n < 400)
+			out[pos++] = path[n++];
+		if (path[n])
+			pos = put(pos, "... (truncated)");
+	} else {
+		pos = put(pos, "(none - usage: susfs_open_probe <path> [flags_hex] [mode_dec] [--openat2|--both] [--resolve=hex])");
+	}
 	pos = put(pos, "\n");
 	emit(pos);
 
