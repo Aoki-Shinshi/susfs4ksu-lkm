@@ -233,6 +233,10 @@ static void susfs_relabel_control_nodes(void)
 static int layer_lsm_hook_init(void)
 {
     ksu_lsm_hook_init();
+    if (!ksu_lsm_hook_ready()) {
+        pr_err("lsm_hook: the table hook insertion walks is not resolvable on this kernel - refusing to load\n");
+        return -ENOENT;
+    }
     return 0;
 }
 
@@ -254,10 +258,14 @@ static struct {
     /* NOT fatal: this layer only decides whether KernelSU's predicate was found at load.
      * When it was not, the gates answer the pre-#34 way and every other layer still works - so a
      * failure here is a degradation, not a reason to refuse the module.  Skipping this init entirely
-     * (fail_layer=1) is safe for the same reason: the flag it sets defaults to the pre-#34 answer. */
+     * (fail_layer=2) is safe for the same reason: the flag it sets defaults to the pre-#34 answer. */
     { "ksu_umount_gate", susfs_ksu_umount_gate_init,	NULL,			false, false },
     { "ksu_allow_gate",	susfs_ksu_allow_gate_init,	NULL,			false, false },
-    { "lsm_hook",	layer_lsm_hook_init,		ksu_lsm_hook_exit,	false, false },
+    /* FATAL: every LSM layer below (sus_path first) inserts through this file's table hooks.
+     * A module that loads without it would accept rules no LSM layer can apply - the same
+     * "loaded but inert" shape fp_hook is fatal for.  ksu_lsm_hook_init() itself only
+     * reports; the refusal lives here, where a failure can fail the load. */
+    { "lsm_hook",	layer_lsm_hook_init,		ksu_lsm_hook_exit,	true,  false },
     { "sus_path",	sus_path_init,			sus_path_exit,		true,  false },
     /* After sus_path, whose rule table and per-caller gate it asks.  NOT fatal: when it
      * cannot arm, the create family keeps answering the kernel's own way (EEXIST for a
@@ -286,8 +294,15 @@ static struct {
 
 /* Diagnostic: make one layer's init fail, by 1-based index, to exercise the rollback path
  * on the device - a `fatal` layer failing must leave the load with nothing armed.
- * `fail_layer=1` skips the ksu_umount_gate init WITHOUT failing the load (that layer is not fatal),
- * which is safe only because its flag defaults to the pre-#34 answer - see ksu_umount_gate.c. */
+ * `fail_layer=2` skips the ksu_umount_gate init WITHOUT failing the load (that layer is not fatal),
+ * which is safe only because its flag defaults to the pre-#34 answer - see ksu_umount_gate.c.
+ *
+ * Index map (keep this list and the fail_layer= references in tools/verify-gki.sh and the layer
+ * comments in sync whenever a layer is inserted):
+ *   1 fp_hook   2 ksu_umount_gate  3 ksu_allow_gate  4 lsm_hook   5 sus_path
+ *   6 create_gate  7 opath  8 dirent  9 uname  10 kstat  11 sus_map  12 sus_mount
+ *   13 cmdline  14 open_redirect  15 enable_log  16 avc_spoof  17 supercall  18 hide_syms
+ */
 static int fail_layer;
 module_param_named(fail_layer, fail_layer, int, 0644);
 
