@@ -109,6 +109,7 @@
  */
 #include <linux/module.h>
 #include <linux/kprobes.h>
+#include <linux/kernel.h>  /* clamp_t()/DIV_ROUND_UP() for the pass cap */
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/stat.h>     /* struct statx (stx_mnt_id) */
@@ -383,7 +384,14 @@ static DEFINE_MUTEX(sus_mount_ctl_lock);
  * Left over is an id recycled while nobody reads a mount table at all: no reader then holds a
  * mount list to compare the rewritten number against.  A shown_id needs no expiry of its own:
  * an ancestor of its mount cannot be unmounted while the child is alive. */
-#define SUS_MOUNT_IDMAP_MAX 64
+/* 64 was room for a handful of bind mounts.  KernelSU's magic mount binds per FILE, so a module
+ * store reaches a few hundred marked mounts on an ordinary device - measured 140 from one module
+ * tree here - and every one past the table kept its KSU-range id in statx/fdinfo (see the full
+ * path in sus_mount_idmap_add()).  256 entries are 3 KB of .bss and leave the lookup a bounded
+ * scan: sus_mount_shown_for() runs it with interrupts off, which is why this is not simply sized
+ * to whatever the marking scan can mark (SUS_MOUNT_SCAN_PASSES_MAX * SUS_MOUNT_ID_BATCH).  Past
+ * 256 the counter and the warning say so instead of the table failing quietly. */
+#define SUS_MOUNT_IDMAP_MAX 256
 
 /* sus_id == 0 marks a free slot; mnt ids are never 0. */
 struct sus_mount_idmap_entry {
@@ -397,6 +405,7 @@ static int n_idmap;
 static DEFINE_SPINLOCK(idmap_lock);
 static atomic_t n_idmap_recycled = ATOMIC_INIT(0);	/* stale entries dropped */
 static atomic_t n_idmap_dropped_dev = ATOMIC_INIT(0);	/* dropped at sb teardown */
+static atomic_t n_idmap_full = ATOMIC_INIT(0);		/* marked mounts with no slot left */
 
 static atomic_t n_fdinfo_hits = ATOMIC_INIT(0);
 static atomic_t n_fdinfo_rewrites = ATOMIC_INIT(0);
@@ -423,8 +432,18 @@ static void sus_mount_idmap_add(int sus_id, int shown_id, dev_t s_dev)
             slot = i;
     }
     if (slot < 0) {
-        if (n_idmap >= SUS_MOUNT_IDMAP_MAX)
+        if (n_idmap >= SUS_MOUNT_IDMAP_MAX) {
+            /* Dropping the mapping is not the same as dropping a line: without it
+             * sus_mount_shown_for() answers 0 for this mount, so the statx/fdinfo rewrites
+             * have nothing to substitute and hand the caller the KSU-range id itself - a
+             * number above SUS_MOUNT_KSU_ID_MIN that no ordinary mount carries, which is
+             * exactly the indicator those two rewrites exist to remove.  It used to happen
+             * silently; a full table is now counted, and said once. */
+            if (atomic_inc_return(&n_idmap_full) == 1)
+                pr_warn("sus_mount: id map full at %d entries - further marked mounts keep their KSU-range id in statx(STATX_MNT_ID) and fdinfo; raise SUS_MOUNT_IDMAP_MAX\n",
+                        SUS_MOUNT_IDMAP_MAX);
             goto out;
+        }
         slot = n_idmap++;
     }
     mount_idmap[slot].sus_id = sus_id;
@@ -1443,7 +1462,7 @@ static int sus_mount_stat_show(char *buf, const struct kernel_param *kp)
                      "idmap=%d/%d  ident=%d/%d  hide=%d su_domain=%d\n"
                      "show_probes=%d/3 (show_vfsstat/show_mountinfo/show_vfsmnt)\n"
                      "ident: hits=%d learned_ids=%d full=%d dropped_dev=%d\n"
-                     "idmap: recycled_dropped=%d dropped_dev=%d\n"
+                     "idmap: recycled_dropped=%d dropped_dev=%d full=%d\n"
                      "sb: down=%d (probe=%d)\n"
                      "clone: walks=%d learned=%d (probe=%d)\n"
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -1463,6 +1482,7 @@ static int sus_mount_stat_show(char *buf, const struct kernel_param *kp)
                      atomic_read(&n_ident_dropped_dev),
                      atomic_read(&n_idmap_recycled),
                      atomic_read(&n_idmap_dropped_dev),
+                     atomic_read(&n_idmap_full),
                      atomic_read(&n_sb_down), (int)kp_sb_down_ok,
                      atomic_read(&n_clone_walks), atomic_read(&n_clone_learned),
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
@@ -1644,8 +1664,12 @@ static bool sus_mount_path_is_ours(const char *s)
  * afterwards (allocated and freed there, so the pairing the kernel expects stays
  * intact). */
 #define SUS_MOUNT_ID_BATCH 8
-/* Passes of SUS_MOUNT_ID_BATCH each, i.e. the most mounts one enable can mark. */
+/* Passes of SUS_MOUNT_ID_BATCH each.  The floor is what a module store needs without having to
+ * ask the walk first; the real cap comes from the walk's own mount count (see
+ * sus_mount_mark_ksu_mounts()), and the ceiling is what keeps a namespace with tens of thousands
+ * of mounts from turning one enable into a long run of walks under ns_lock. */
 #define SUS_MOUNT_SCAN_PASSES 16
+#define SUS_MOUNT_SCAN_PASSES_MAX 256
 
 /* ---- control surface: which mounts are ours ---- */
 
@@ -2117,7 +2141,7 @@ static const struct proc_ops sus_mount_keep_proc_ops = {
 static struct proc_dir_entry *sus_mount_keep_entry;
 
 static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long min,
-                             bool *more)
+                             bool *more, unsigned int *seen_out)
 {
     int batch[SUS_MOUNT_ID_BATCH];
     /* The ids the mounts already owned, so they can be handed back to the kernel's ida once
@@ -2133,6 +2157,7 @@ static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long 
     int marked = 0;
     unsigned int n_devname = 0, n_dpath_ok = 0, n_dpath_err = 0;
     *more = false;
+    *seen_out = 0;
     unsigned int n_skipped_ns = 0, n_skipped_marked = 0;
     bool hit_cap = false;
     int i;
@@ -2273,6 +2298,7 @@ static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long 
     SUSFS_LOGI("sus_mount: ns %p: seen=%u devname_hits=%u dpath_ok=%u dpath_err=%u skipped(other ns/cursor)=%u skipped(already marked)=%u marked=%d ids_alloc=%d\n",
             ns, seen, n_devname, n_dpath_ok, n_dpath_err, n_skipped_ns,
             n_skipped_marked, marked, n_batch);
+    *seen_out = seen;
     return marked;
 }
 
@@ -2281,7 +2307,8 @@ static int sus_mount_mark_ksu_mounts(void)
     char *buf;
     unsigned long min;
     int marked = 0;
-    int pass;
+    unsigned int pass, max_passes = SUS_MOUNT_SCAN_PASSES;
+    unsigned int want, afford;
     bool more = false;
 
     /* Fail closed: without all three symbols we cannot own a real id, and a
@@ -2333,17 +2360,33 @@ static int sus_mount_mark_ksu_mounts(void)
      * than that left the rest unmarked and visible in /proc/mounts, so run passes until the
      * scan reports nothing more to mark - capped, so a namespace that grows under us cannot
      * spin here. */
-    for (pass = 0; pass < SUS_MOUNT_SCAN_PASSES; pass++) {
-        int n = sus_mount_scan_ns(current->nsproxy->mnt_ns, buf, min, &more);
+    for (pass = 0; pass < max_passes; pass++) {
+        unsigned int seen = 0;
+        int n = sus_mount_scan_ns(current->nsproxy->mnt_ns, buf, min, &more, &seen);
 
         if (n > 0)
             marked += n;
         if (!more)
             break;
+        /* A fixed 16 passes was 128 mounts, and a magic-mount store binds per file: past that
+         * the rest stayed in /proc/mounts behind the warning below.  The walk already counts the
+         * mounts it saw, and a namespace cannot need more passes than it has mounts, so that
+         * count says how many passes the mounts WANT.
+         *
+         * What they cost is the other half: every pass re-walks the whole table under the
+         * namespace lock, so the lock is held for roughly passes * seen.  Bound that at one
+         * cap-sized walk.  A module store - hundreds of mounts - still gets every pass it
+         * wants (600 mounts want 76 and can afford 109), while a table that is not a module
+         * store at all gets one: binding into a shared subtree propagates to every peer, which
+         * is O(N^2) and reached 77056 mounts from 300 binds on the test device, and walking
+         * that hundreds of times is minutes of other tasks waiting for the mount table. */
+        want = DIV_ROUND_UP(seen, SUS_MOUNT_ID_BATCH) + 1;
+        afford = max(SUS_MOUNT_MAX_SCAN / max(seen, 1u), 1u);
+        max_passes = clamp_t(unsigned int, min(want, afford), 1u, SUS_MOUNT_SCAN_PASSES_MAX);
     }
     if (more)
-        pr_warn("sus_mount: still more mounts to mark after %d passes (%d marked); raise SUS_MOUNT_SCAN_PASSES or SUS_MOUNT_ID_BATCH\n",
-                SUS_MOUNT_SCAN_PASSES, marked);
+        pr_warn("sus_mount: still more mounts to mark after %u passes of %d (%d marked); raise SUS_MOUNT_SCAN_PASSES_MAX or SUS_MOUNT_ID_BATCH\n",
+                max_passes, SUS_MOUNT_ID_BATCH, marked);
 
     kfree(buf);
 
