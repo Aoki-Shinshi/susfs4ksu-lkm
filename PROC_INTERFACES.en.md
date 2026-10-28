@@ -242,4 +242,4 @@ echo "del /system/lib64/libfoo.so" > /proc/susfs_map
 echo clear > /proc/susfs_map
 ```
 
-`add` resolves the path (following symlinks) and registers its inode; `del` resolves the same path and removes the matching rule; `clear` drops all rules. Writes return `len` on success and a negative errno on failure. It is 0777, but reads and writes use the same su-side gate as the other control nodes. The `map_ino` module parameter still registers one inode at load time; that rule stores no device (dev=0), matches by inode on any filesystem, and `del <path>` removes the first matching entry.
+`add` resolves the path (following symlinks) and registers its inode; `del` resolves the same path and removes the matching rule; `clear` drops all rules. 
