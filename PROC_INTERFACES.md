@@ -242,4 +242,4 @@ echo "del /system/lib64/libfoo.so" > /proc/susfs_map
 echo clear > /proc/susfs_map
 ```
 
-`add` 解析路径（跟随符号链接）并登记 inode；`del` 解析同一路径后删除匹配项；`clear` 清空。写成功返回 `len`，失败返回负 errno。节点 0777；读写与其它控制节点走同一套 su 侧门控。`map_ino` 模块参数仍可在加载时登记一个 inode；该规则不保存 dev（dev=0），按 inode 匹配任意文件系统，`del <path>` 会命中第一条匹配项。
+`add` 解析路径（跟随符号链接）并登记 inode；`del` 解析同一路径后删除匹配项；`clear` 清空。
